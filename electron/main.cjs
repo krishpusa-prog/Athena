@@ -96,7 +96,7 @@ ipcMain.handle('proctor:save-image', guarded(async (_event, { dataUrl, filename 
 app.whenReady().then(() => {
   createWindow()
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow
+    if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
 })
 
