@@ -46,6 +46,29 @@ function guarded(handler) {
 }
 
 // ---- IPC handlers (stubs) ----
+const EXAM_RULES = [
+  '1. Do not open any new tabs or applications.',
+  '2. Zero marks if cheating is detected.',
+  '3. Your camera must stay on for the entire exam.',
+  '4. Do not leave full-screen mode until you submit.',
+]
+
+ipcMain.handle('exam:show-rules', guarded(async (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender)
+
+  const { response } = await dialog.showMessageBox(win, {
+    type: 'warning',
+    title: 'Exam Rules',
+    message: 'Please read the exam rules carefully',
+    detail: EXAM_RULES.join('\n\n'),
+    buttons: ['Accept', 'Cancel'],
+    defaultId: 1,   // Enter/Space won't accept by accident
+    cancelId: 1,    // Esc or closing the dialog counts as Cancel
+    noLink: true,
+  })
+
+  return response === 0 // true only if the student clicked "Accept"
+}))
 ipcMain.handle('window:set-fullscreen', guarded((event, flag) => {
   const win = BrowserWindow.fromWebContents(event.sender)
   if (!win) return false

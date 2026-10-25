@@ -20,6 +20,13 @@ const CheckIcon = () => (
   </svg>
 )
 
+const BADGE_LABELS = {
+  idle: 'Pending',
+  pending: 'Requesting…',
+  granted: 'Granted',
+  denied: 'Failed',
+}
+
 function getCameraErrorMessage(err) {
   switch (err?.name) {
     case 'NotAllowedError':
@@ -51,7 +58,13 @@ function PermissionItem({
       <div className="permission__icon">{granted ? <CheckIcon /> : icon}</div>
 
       <div className="permission__text">
-        <h2 className="permission__title">{title}</h2>
+        <div className="permission__heading">
+          <h2 className="permission__title">{title}</h2>
+          <span className={`badge badge--${status}`}>
+            {granted && <CheckIcon />}
+            {BADGE_LABELS[status]}
+          </span>
+        </div>
         <p className="permission__desc">
           {status === 'denied'
             ? errorMessage || 'Permission was denied. Please try again.'
@@ -74,18 +87,22 @@ function PermissionItem({
 export default function App() {
   const [camera, setCamera] = useState('idle') // 'idle' | 'pending' | 'granted' | 'denied'
   const [cameraError, setCameraError] = useState('')
-  const [stream, setStream] = useState(null)
   const [fullscreen, setFullscreen] = useState('idle')
+  const [stream, setStream] = useState(null)
+
+  const [started, setStarted] = useState(false)
+  const [starting, setStarting] = useState(false)
+  const [rulesError, setRulesError] = useState('')
 
   const videoRef = useRef(null)
-  const streamRef = useRef(null) // lets cleanup see the latest stream
+  const streamRef = useRef(null)
 
-  // Attach the stream once the <video> element has actually mounted.
+  const bothGranted = camera === 'granted' && fullscreen === 'granted'
+
   useEffect(() => {
     if (videoRef.current) videoRef.current.srcObject = stream
   }, [stream])
 
-  // Release the camera when the component unmounts.
   useEffect(() => {
     return () => streamRef.current?.getTracks().forEach((t) => t.stop())
   }, [])
@@ -97,7 +114,6 @@ export default function App() {
     try {
       const mediaStream = await navigator.mediaDevices.getUserMedia({ video: true })
 
-      // If the camera is unplugged or revoked mid-session, reset the UI.
       mediaStream.getVideoTracks()[0].addEventListener('ended', () => {
         streamRef.current = null
         setStream(null)
@@ -114,23 +130,50 @@ export default function App() {
     }
   }
 
-const switchToFullscreen = async () => {
-  setFullscreen('pending')
-  try {
-    if (window.electronAPI) {
-      const isLocked = await window.electronAPI.setFullScreen(true) // kiosk mode
-      setFullscreen(isLocked ? 'granted' : 'denied')
-    } else {
-      // Plain-browser fallback (npm run dev without Electron)
-      await document.documentElement.requestFullscreen()
-      setFullscreen('granted')
+  const switchToFullscreen = async () => {
+    setFullscreen('pending')
+    try {
+      if (window.electronAPI) {
+        const isLocked = await window.electronAPI.setFullScreen(true) // kiosk mode
+        setFullscreen(isLocked ? 'granted' : 'denied')
+      } else {
+        await document.documentElement.requestFullscreen()
+        setFullscreen('granted')
+      }
+    } catch {
+      setFullscreen('denied')
     }
-  } catch {
-    setFullscreen('denied')
   }
-}
 
-  const allGranted = camera === 'granted' && fullscreen === 'granted'
+  const goToTest = async () => {
+    if (!bothGranted || starting) return
+    setStarting(true)
+    setRulesError('')
+
+    try {
+      let accepted
+      if (window.electronAPI) {
+        accepted = await window.electronAPI.showExamRules()
+      } else {
+        // Plain-browser fallback (npm run dev without Electron)
+        accepted = window.confirm(
+          '1. Do not switch tabs or windows\n2. Cheating results in 0 marks\n\nAccept?'
+        )
+      }
+
+      if (!accepted) {
+        setRulesError('You must accept the exam rules to begin the test.')
+        return
+      }
+
+      await window.electronAPI?.startTest({ durationMinutes: 60 })
+      setStarted(true)
+    } catch {
+      setRulesError('Something went wrong. Please try again.')
+    } finally {
+      setStarting(false)
+    }
+  }
 
   return (
     <main className="app">
@@ -143,42 +186,56 @@ const switchToFullscreen = async () => {
         </div>
       )}
 
-      <section className="card">
-        <header className="card__header">
+      {started ? (
+        <section className="card">
           <span className="brand">Athena</span>
-          <h1 className="greeting">Hi User! Kindly Allow the following Permissions</h1>
-          <p className="subtitle">These are required before your exam can begin.</p>
-        </header>
+          <h1 className="greeting">The exam has started</h1>
+          <p className="subtitle">Placeholder: your question screen goes here.</p>
+        </section>
+      ) : (
+        <section className="card">
+          <header className="card__header">
+            <span className="brand">Athena</span>
+            <h1 className="greeting">Hi User! Kindly Allow the following Permissions</h1>
+            <p className="subtitle">These are required before your exam can begin.</p>
+          </header>
 
-        <ul className="permissions">
-          <PermissionItem
-            icon={<CameraIcon />}
-            title="Configure Camera"
-            description="Your camera is used to verify your identity during the exam."
-            status={camera}
-            errorMessage={cameraError}
-            actionLabel="Get Camera Access"
-            grantedLabel="Camera Configured"
-            onAction={getCameraAccess}
-          />
-          <PermissionItem
-  icon={<FullscreenIcon />}
-  title="Switch to full screen"
-  description="The exam runs in a locked full-screen mode to keep the session secure."
-  status={fullscreen}
-  errorMessage="Could not enter full screen. Please try again."
-  actionLabel="Give Full Screen Permissions"
-  grantedLabel="Full Screen Enabled"
-  onAction={switchToFullscreen}
-/>
-        </ul>
+          <ul className="permissions">
+            <PermissionItem
+              icon={<CameraIcon />}
+              title="Configure Camera"
+              description="Your camera is used to verify your identity during the exam."
+              status={camera}
+              errorMessage={cameraError}
+              actionLabel="Get Camera Access"
+              grantedLabel="Camera Configured"
+              onAction={getCameraAccess}
+            />
+            <PermissionItem
+              icon={<FullscreenIcon />}
+              title="Switch to full screen"
+              description="The exam runs in a locked full-screen mode to keep the session secure."
+              status={fullscreen}
+              errorMessage="Could not enter full screen. Please try again."
+              actionLabel="Give Full Screen Permissions"
+              grantedLabel="Full Screen Enabled"
+              onAction={switchToFullscreen}
+            />
+          </ul>
 
-        <footer className="card__footer">
-          <button type="button" className="btn btn--primary" disabled={!allGranted}>
-            Continue
-          </button>
-        </footer>
-      </section>
+          <footer className="card__footer">
+            {rulesError && <p className="footer-error" role="alert">{rulesError}</p>}
+            <button
+              type="button"
+              className="btn btn--primary"
+              disabled={!bothGranted || starting}
+              onClick={goToTest}
+            >
+              {starting ? 'Starting…' : 'Go To Test'}
+            </button>
+          </footer>
+        </section>
+      )}
     </main>
   )
 }
