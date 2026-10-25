@@ -1,12 +1,33 @@
-const { app, BrowserWindow, ipcMain, dialog } = require('electron')
+const { app, BrowserWindow, ipcMain, dialog, session, globalShortcut } = require('electron')
 const path = require('path')
 const fs = require('fs/promises')
 
-const isDev = !app.isPackaged
+// `npm start` passes --prod so Electron loads dist/ instead of the Vite dev server.
+const isDev = !app.isPackaged && !process.argv.includes('--prod')
 const DEV_URL = 'http://127.0.0.1:5173'
 
-// ---- Temporary in-memory exam state (replace with real logic later) ----
-const examState = { running: false, endsAt: 0 }
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024
+
+const EXAM_RULES = [
+  '1. Do not switch tabs or windows.',
+  '2. Cheating results in 0 marks.',
+  '3. Photos from your camera are captured periodically for proctoring.',
+]
+
+// Exam state lives in the main process so the renderer can't tamper with it.
+const examState = {
+  running: false,
+  endsAt: 0,
+  rulesAccepted: false,
+  submitted: false,
+}
+
+// Dev: electron/cameraFeed. Packaged: __dirname is a read-only asar, so use userData.
+function getCameraFeedDir() {
+  return isDev
+    ? path.join(__dirname, 'cameraFeed')
+    : path.join(app.getPath('userData'), 'cameraFeed')
+}
 
 function createWindow() {
   const win = new BrowserWindow({
@@ -16,7 +37,6 @@ function createWindow() {
     minHeight: 700,
     backgroundColor: '#0f172a',
     webPreferences: {
-      // Must be an absolute path; __dirname keeps it correct in dev and packaged builds.
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
@@ -24,13 +44,24 @@ function createWindow() {
     },
   })
 
+  // Alt+F4 / Cmd+W / window close are ignored while an exam is running.
+  win.on('close', (e) => {
+    if (examState.running) e.preventDefault()
+  })
+
   if (isDev) {
     win.loadURL(DEV_URL)
-    win.webContents.openDevTools({ mode: 'detach' })
+    // DevTools steal focus and would trigger strikes, so it's opt-in:
+    //   ATHENA_DEVTOOLS=1 npm run dev
+    if (process.env.ATHENA_DEVTOOLS) win.webContents.openDevTools({ mode: 'detach' })
   } else {
     win.loadFile(path.join(__dirname, '../dist/index.html'))
   }
+
+  return win
 }
+
+// ---------- IPC security helpers ----------
 
 // Only accept IPC from our own app pages, not from any other content.
 function isTrustedSender(event) {
@@ -45,16 +76,64 @@ function guarded(handler) {
   }
 }
 
-// ---- IPC handlers (stubs) ----
-const MAX_IMAGE_BYTES = 10 * 1024 * 1024 // reject anything absurdly large
+// ---------- IPC handlers ----------
 
-// Dev: electron/cameraFeed (as requested).
-// Packaged: __dirname is inside a read-only asar, so use the userData folder instead.
-function getCameraFeedDir() {
-  return isDev
-    ? path.join(__dirname, 'cameraFeed')
-    : path.join(app.getPath('userData'), 'cameraFeed')
-}
+// Kiosk mode: fullscreen with the OS frame, dock/taskbar and menu bar locked out.
+ipcMain.handle('window:set-fullscreen', guarded((event, flag) => {
+  const win = BrowserWindow.fromWebContents(event.sender)
+  if (!win) return false
+
+  const enable = Boolean(flag)
+  win.setKiosk(enable)
+
+  if (enable) {
+    win.setClosable(false)
+    win.setMinimizable(false)
+    win.setAlwaysOnTop(true, 'screen-saver')
+    win.focus()
+  } else {
+    win.setClosable(true)
+    win.setMinimizable(true)
+    win.setAlwaysOnTop(false)
+  }
+
+  return win.isKiosk()
+}))
+
+ipcMain.handle('exam:show-rules', guarded(async (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender)
+
+  const { response } = await dialog.showMessageBox(win, {
+    type: 'warning',
+    title: 'Exam Rules',
+    message: 'Please read the exam instructions',
+    detail: EXAM_RULES.join('\n\n'),
+    buttons: ['Accept', 'Cancel'],
+    defaultId: 1, // Enter won't accept by accident
+    cancelId: 1,  // Esc / closing the dialog = Cancel
+    noLink: true,
+  })
+
+  examState.rulesAccepted = response === 0
+  return examState.rulesAccepted
+}))
+
+ipcMain.handle('exam:start', guarded((_event, config = {}) => {
+  // Enforced here, so DevTools can't skip the rules dialog.
+  if (!examState.rulesAccepted) throw new Error('Exam rules have not been accepted')
+
+  const minutes = Number(config.durationMinutes) > 0 ? Number(config.durationMinutes) : 60
+  examState.running = true
+  examState.submitted = false
+  examState.endsAt = Date.now() + minutes * 60 * 1000
+  return { started: true, endsAt: examState.endsAt }
+}))
+
+ipcMain.handle('exam:get-remaining-time', guarded(() => {
+  const remainingMs = examState.running ? Math.max(0, examState.endsAt - Date.now()) : 0
+  if (examState.running && remainingMs === 0) examState.running = false
+  return { remainingMs, running: examState.running }
+}))
 
 ipcMain.handle('proctor:save-image-to-folder', guarded(async (_event, arrayBuffer) => {
   // Only accept photos while an exam is actually running.
@@ -78,95 +157,49 @@ ipcMain.handle('proctor:save-image-to-folder', guarded(async (_event, arrayBuffe
   await fs.writeFile(filePath, buffer)
   return { saved: true, path: filePath }
 }))
-const EXAM_RULES = [
-  '1. Do not open any new tabs or applications.',
-  '2. Zero marks if cheating is detected.',
-  '3. Your camera must stay on for the entire exam.',
-  '4. Do not leave full-screen mode until you submit.',
-]
 
-ipcMain.handle('exam:show-rules', guarded(async (event) => {
-  const win = BrowserWindow.fromWebContents(event.sender)
-
-  const { response } = await dialog.showMessageBox(win, {
-    type: 'warning',
-    title: 'Exam Rules',
-    message: 'Please read the exam rules carefully',
-    detail: EXAM_RULES.join('\n\n'),
-    buttons: ['Accept', 'Cancel'],
-    defaultId: 1,   // Enter/Space won't accept by accident
-    cancelId: 1,    // Esc or closing the dialog counts as Cancel
-    noLink: true,
-  })
-
-  return response === 0 // true only if the student clicked "Accept"
+ipcMain.handle('exam:submit', guarded(() => {
+  examState.running = false // also makes save-image-to-folder reject further photos
+  examState.submitted = true
+  return { submitted: true }
 }))
-ipcMain.handle('window:set-fullscreen', guarded((event, flag) => {
+
+ipcMain.handle('app:quit', guarded((event) => {
+  if (examState.running) throw new Error('Submit the exam before exiting')
+
   const win = BrowserWindow.fromWebContents(event.sender)
-  if (!win) return false
-
-  const enable = Boolean(flag)
-
-  // Kiosk mode: fullscreen with the OS frame, dock/taskbar and menu bar locked out.
-  // (`win.kiosk = enable` is equivalent to setKiosk.)
-  win.setKiosk(enable)
-
-  if (enable) {
-    win.setClosable(false)          // block the window close button
-    win.setMinimizable(false)
-    win.setAlwaysOnTop(true, 'screen-saver')
-    win.focus()
-  } else {
+  if (win) {
+    win.setKiosk(false)
     win.setClosable(true)
-    win.setMinimizable(true)
     win.setAlwaysOnTop(false)
   }
-
-  return win.isKiosk()
-}))
-
-ipcMain.handle('exam:get-remaining-time', guarded(() => {
-  const remainingMs = examState.running ? Math.max(0, examState.endsAt - Date.now()) : 0
-  if (examState.running && remainingMs === 0) examState.running = false
-  return { remainingMs, running: examState.running }
-}))
-
-ipcMain.handle('exam:start', guarded((_event, config = {}) => {
-  const minutes = Number(config.durationMinutes) > 0 ? Number(config.durationMinutes) : 60
-  examState.running = true
-  examState.endsAt = Date.now() + minutes * 60 * 1000
-  // TODO: lock down window, start focus-loss monitoring, etc.
-  return { started: true, endsAt: examState.endsAt }
-}))
-
-ipcMain.handle('exam:show-rules', guarded(async (event) => {
-  const win = BrowserWindow.fromWebContents(event.sender)
-  await dialog.showMessageBox(win, {
-    type: 'info',
-    title: 'Exam Rules',
-    message: 'Please read the exam rules',
-    detail: 'TODO: replace with the real rules text.',
-    buttons: ['I Understand'],
-  })
+  app.quit()
   return true
 }))
 
-ipcMain.handle('proctor:save-image', guarded(async (_event, { dataUrl, filename } = {}) => {
-  const match = /^data:image\/(png|jpeg);base64,([A-Za-z0-9+/=]+)$/.exec(dataUrl || '')
-  if (!match) throw new Error('Invalid image data')
-
-  // basename() blocks path traversal like "../../something"
-  const safeName = path.basename(filename || `capture-${Date.now()}.${match[1]}`)
-  const dir = path.join(app.getPath('userData'), 'captures')
-  await fs.mkdir(dir, { recursive: true })
-
-  const filePath = path.join(dir, safeName)
-  await fs.writeFile(filePath, Buffer.from(match[2], 'base64'))
-  return { saved: true, path: filePath }
-}))
+// ---------- App lifecycle ----------
 
 app.whenReady().then(() => {
+  // Allow camera only; deny every other permission request.
+  session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => {
+    callback(permission === 'media')
+  })
+
   createWindow()
+
+  if (isDev) {
+    // Dev-only escape hatch: Ctrl/Cmd + Shift + K exits kiosk mode.
+    globalShortcut.register('CommandOrControl+Shift+K', () => {
+      const win = BrowserWindow.getAllWindows()[0]
+      if (!win) return
+      examState.running = false // otherwise the close handler would block quitting
+      win.setKiosk(false)
+      win.setClosable(true)
+      win.setMinimizable(true)
+      win.setAlwaysOnTop(false)
+    })
+  }
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
@@ -175,3 +208,5 @@ app.whenReady().then(() => {
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
+
+app.on('will-quit', () => globalShortcut.unregisterAll())
