@@ -50,16 +50,33 @@ function getCameraErrorMessage(err) {
   }
 }
 
-async function captureJpegBlob(imageCapture) {
-  try {
-    return await imageCapture.takePhoto()
-  } catch {
-    const bitmap = await imageCapture.grabFrame()
-    const canvas = new OffscreenCanvas(bitmap.width, bitmap.height)
-    canvas.getContext('2d').drawImage(bitmap, 0, 0)
-    bitmap.close()
-    return canvas.convertToBlob({ type: 'image/jpeg', quality: 0.85 })
+async function captureJpegBlob(imageCapture, videoEl) {
+  if (imageCapture) {
+    try {
+      return await imageCapture.takePhoto()
+    } catch {
+      try {
+        const bitmap = await imageCapture.grabFrame()
+        const canvas = new OffscreenCanvas(bitmap.width, bitmap.height)
+        canvas.getContext('2d').drawImage(bitmap, 0, 0)
+        bitmap.close()
+        return await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.85 })
+      } catch {
+        // Fall back to DOM canvas below
+      }
+    }
   }
+
+  if (videoEl && videoEl.videoWidth > 0) {
+    const canvas = document.createElement('canvas')
+    canvas.width = videoEl.videoWidth
+    canvas.height = videoEl.videoHeight
+    const ctx = canvas.getContext('2d')
+    ctx.drawImage(videoEl, 0, 0)
+    return new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.85))
+  }
+
+  throw new Error('No capture source available')
 }
 
 function formatDuration(ms) {
@@ -143,7 +160,7 @@ export default function App() {
       total,
       answered,
       skipped: total - answered,
-      timeTakenMs: Date.now() - startedAtRef.current,
+      timeTakenMs: Date.now() - (startedAtRef.current || Date.now()),
     })
     setWarningOpen(false)
 
@@ -191,13 +208,21 @@ export default function App() {
 
   // ---------- Timer (source of truth lives in the main process) ----------
   useEffect(() => {
-    if (!started || result || !window.electronAPI) return
+    if (!started || result) return
 
     const tick = async () => {
       try {
-        const { remainingMs, running } = await window.electronAPI.getRemainingTime()
-        setRemainingMs(remainingMs)
-        if (!running) submitExam('time')
+        if (window.electronAPI) {
+          const { remainingMs, running } = await window.electronAPI.getRemainingTime()
+          setRemainingMs(remainingMs)
+          if (!running) submitExam('time')
+        } else {
+          // Web preview fallback countdown
+          const elapsed = Date.now() - startedAtRef.current
+          const ms = Math.max(0, 60 * 60 * 1000 - elapsed)
+          setRemainingMs(ms)
+          if (ms <= 0) submitExam('time')
+        }
       } catch { /* ignore a missed tick */ }
     }
     tick()
@@ -205,9 +230,12 @@ export default function App() {
     return () => clearInterval(id)
   }, [started, result, submitExam])
 
-  // ---------- Camera ----------
+  // ---------- Camera Feed Binding ----------
   useEffect(() => {
-    if (videoRef.current) videoRef.current.srcObject = stream
+    if (videoRef.current && stream) {
+      videoRef.current.srcObject = stream
+      videoRef.current.play?.().catch(() => {})
+    }
   }, [stream, started])
 
   useEffect(() => {
@@ -221,16 +249,26 @@ export default function App() {
     const track = streamRef.current?.getVideoTracks()[0]
     if (!track) return
 
-    const imageCapture = new ImageCapture(track)
+    let imageCapture = null
+    try {
+      if (typeof ImageCapture !== 'undefined') {
+        imageCapture = new ImageCapture(track)
+      }
+    } catch (e) {
+      console.warn('ImageCapture init skipped:', e)
+    }
+
     let busy = false
 
     const capture = async () => {
       if (busy || track.readyState !== 'live') return
       busy = true
       try {
-        const blob = await captureJpegBlob(imageCapture)
-        const arrayBuffer = await blob.arrayBuffer()
-        await window.electronAPI?.saveImage(arrayBuffer)
+        const blob = await captureJpegBlob(imageCapture, videoRef.current)
+        if (blob) {
+          const arrayBuffer = await blob.arrayBuffer()
+          await window.electronAPI?.saveImage(arrayBuffer)
+        }
       } catch (err) {
         console.warn('Snapshot failed:', err)
       } finally {
