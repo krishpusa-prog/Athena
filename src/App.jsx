@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import './App.css'
 
 const CameraIcon = () => (
@@ -20,8 +20,31 @@ const CheckIcon = () => (
   </svg>
 )
 
-function PermissionItem({ icon, title, description, status, actionLabel, onAction }) {
+function getCameraErrorMessage(err) {
+  switch (err?.name) {
+    case 'NotAllowedError':
+      return 'Camera access was blocked. Allow it in your system settings and try again.'
+    case 'NotFoundError':
+      return 'No camera was found. Connect a webcam and try again.'
+    case 'NotReadableError':
+      return 'Your camera is in use by another application. Close it and try again.'
+    default:
+      return 'Could not start the camera. Please try again.'
+  }
+}
+
+function PermissionItem({
+  icon,
+  title,
+  description,
+  status,
+  errorMessage,
+  actionLabel,
+  grantedLabel = 'Done',
+  onAction,
+}) {
   const granted = status === 'granted'
+  const pending = status === 'pending'
 
   return (
     <li className={`permission permission--${status}`}>
@@ -30,7 +53,9 @@ function PermissionItem({ icon, title, description, status, actionLabel, onActio
       <div className="permission__text">
         <h2 className="permission__title">{title}</h2>
         <p className="permission__desc">
-          {status === 'denied' ? 'Permission was denied. Please try again.' : description}
+          {status === 'denied'
+            ? errorMessage || 'Permission was denied. Please try again.'
+            : description}
         </p>
       </div>
 
@@ -38,24 +63,53 @@ function PermissionItem({ icon, title, description, status, actionLabel, onActio
         type="button"
         className="btn btn--secondary"
         onClick={onAction}
-        disabled={granted}
+        disabled={granted || pending}
       >
-        {granted ? 'Done' : actionLabel}
+        {granted ? grantedLabel : pending ? 'Requesting…' : actionLabel}
       </button>
     </li>
   )
 }
 
 export default function App() {
-  const [camera, setCamera] = useState('idle')         // 'idle' | 'granted' | 'denied'
+  const [camera, setCamera] = useState('idle') // 'idle' | 'pending' | 'granted' | 'denied'
+  const [cameraError, setCameraError] = useState('')
+  const [stream, setStream] = useState(null)
   const [fullscreen, setFullscreen] = useState('idle')
 
-  const configureCamera = async () => {
+  const videoRef = useRef(null)
+  const streamRef = useRef(null) // lets cleanup see the latest stream
+
+  // Attach the stream once the <video> element has actually mounted.
+  useEffect(() => {
+    if (videoRef.current) videoRef.current.srcObject = stream
+  }, [stream])
+
+  // Release the camera when the component unmounts.
+  useEffect(() => {
+    return () => streamRef.current?.getTracks().forEach((t) => t.stop())
+  }, [])
+
+  const getCameraAccess = async () => {
+    setCamera('pending')
+    setCameraError('')
+
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true })
-      stream.getTracks().forEach((track) => track.stop()) // we only needed the permission check
+      const mediaStream = await navigator.mediaDevices.getUserMedia({ video: true })
+
+      // If the camera is unplugged or revoked mid-session, reset the UI.
+      mediaStream.getVideoTracks()[0].addEventListener('ended', () => {
+        streamRef.current = null
+        setStream(null)
+        setCamera('denied')
+        setCameraError('The camera was disconnected. Reconnect it and try again.')
+      })
+
+      streamRef.current = mediaStream
+      setStream(mediaStream)
       setCamera('granted')
-    } catch {
+    } catch (err) {
+      setCameraError(getCameraErrorMessage(err))
       setCamera('denied')
     }
   }
@@ -66,7 +120,6 @@ export default function App() {
         const isFullScreen = await window.electronAPI.setFullScreen(true)
         setFullscreen(isFullScreen ? 'granted' : 'denied')
       } else {
-        // Plain-browser fallback (npm run dev without Electron)
         await document.documentElement.requestFullscreen()
         setFullscreen('granted')
       }
@@ -79,13 +132,20 @@ export default function App() {
 
   return (
     <main className="app">
+      {stream && (
+        <div className="camera-preview" role="img" aria-label="Live camera preview">
+          <video ref={videoRef} autoPlay muted playsInline />
+          <span className="camera-preview__badge">
+            <span className="camera-preview__dot" /> Live
+          </span>
+        </div>
+      )}
+
       <section className="card">
         <header className="card__header">
           <span className="brand">Athena</span>
           <h1 className="greeting">Hi User! Kindly Allow the following Permissions</h1>
-          <p className="subtitle">
-            These are required before your exam can begin.
-          </p>
+          <p className="subtitle">These are required before your exam can begin.</p>
         </header>
 
         <ul className="permissions">
@@ -94,8 +154,10 @@ export default function App() {
             title="Configure Camera"
             description="Your camera is used to verify your identity during the exam."
             status={camera}
-            actionLabel="Allow"
-            onAction={configureCamera}
+            errorMessage={cameraError}
+            actionLabel="Get Camera Access"
+            grantedLabel="Camera Configured"
+            onAction={getCameraAccess}
           />
           <PermissionItem
             icon={<FullscreenIcon />}
