@@ -46,6 +46,38 @@ function guarded(handler) {
 }
 
 // ---- IPC handlers (stubs) ----
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024 // reject anything absurdly large
+
+// Dev: electron/cameraFeed (as requested).
+// Packaged: __dirname is inside a read-only asar, so use the userData folder instead.
+function getCameraFeedDir() {
+  return isDev
+    ? path.join(__dirname, 'cameraFeed')
+    : path.join(app.getPath('userData'), 'cameraFeed')
+}
+
+ipcMain.handle('proctor:save-image-to-folder', guarded(async (_event, arrayBuffer) => {
+  // Only accept photos while an exam is actually running.
+  if (!examState.running) throw new Error('No exam in progress')
+
+  if (!(arrayBuffer instanceof ArrayBuffer) && !ArrayBuffer.isView(arrayBuffer)) {
+    throw new Error('Expected binary image data')
+  }
+
+  const buffer = Buffer.from(arrayBuffer)
+  if (buffer.length === 0 || buffer.length > MAX_IMAGE_BYTES) {
+    throw new Error('Invalid image size')
+  }
+
+  // Some cameras return PNG from takePhoto(); keep the extension honest.
+  const isPng = buffer[0] === 0x89 && buffer[1] === 0x50
+  const dir = getCameraFeedDir()
+  await fs.mkdir(dir, { recursive: true }) // creates cameraFeed/ if missing
+
+  const filePath = path.join(dir, `${Date.now()}.${isPng ? 'png' : 'jpg'}`)
+  await fs.writeFile(filePath, buffer)
+  return { saved: true, path: filePath }
+}))
 const EXAM_RULES = [
   '1. Do not open any new tabs or applications.',
   '2. Zero marks if cheating is detected.',

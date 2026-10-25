@@ -1,6 +1,17 @@
 import { useState, useRef, useEffect } from 'react'
 import './App.css'
 
+async function captureJpegBlob(imageCapture) {
+  try {
+    return await imageCapture.takePhoto()
+  } catch {
+    const bitmap = await imageCapture.grabFrame()
+    const canvas = new OffscreenCanvas(bitmap.width, bitmap.height)
+    canvas.getContext('2d').drawImage(bitmap, 0, 0)
+    bitmap.close()
+    return canvas.convertToBlob({ type: 'image/jpeg', quality: 0.85 })
+  }
+}
 const CameraIcon = () => (
   <svg viewBox="0 0 24 24" aria-hidden="true">
     <path d="M4 7h3l1.5-2h7L17 7h3a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1Z" />
