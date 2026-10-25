@@ -49,8 +49,25 @@ function guarded(handler) {
 ipcMain.handle('window:set-fullscreen', guarded((event, flag) => {
   const win = BrowserWindow.fromWebContents(event.sender)
   if (!win) return false
-  win.setFullScreen(Boolean(flag))
-  return win.isFullScreen()
+
+  const enable = Boolean(flag)
+
+  // Kiosk mode: fullscreen with the OS frame, dock/taskbar and menu bar locked out.
+  // (`win.kiosk = enable` is equivalent to setKiosk.)
+  win.setKiosk(enable)
+
+  if (enable) {
+    win.setClosable(false)          // block the window close button
+    win.setMinimizable(false)
+    win.setAlwaysOnTop(true, 'screen-saver')
+    win.focus()
+  } else {
+    win.setClosable(true)
+    win.setMinimizable(true)
+    win.setAlwaysOnTop(false)
+  }
+
+  return win.isKiosk()
 }))
 
 ipcMain.handle('exam:get-remaining-time', guarded(() => {

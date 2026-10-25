@@ -114,19 +114,21 @@ export default function App() {
     }
   }
 
-  const switchToFullscreen = async () => {
-    try {
-      if (window.electronAPI) {
-        const isFullScreen = await window.electronAPI.setFullScreen(true)
-        setFullscreen(isFullScreen ? 'granted' : 'denied')
-      } else {
-        await document.documentElement.requestFullscreen()
-        setFullscreen('granted')
-      }
-    } catch {
-      setFullscreen('denied')
+const switchToFullscreen = async () => {
+  setFullscreen('pending')
+  try {
+    if (window.electronAPI) {
+      const isLocked = await window.electronAPI.setFullScreen(true) // kiosk mode
+      setFullscreen(isLocked ? 'granted' : 'denied')
+    } else {
+      // Plain-browser fallback (npm run dev without Electron)
+      await document.documentElement.requestFullscreen()
+      setFullscreen('granted')
     }
+  } catch {
+    setFullscreen('denied')
   }
+}
 
   const allGranted = camera === 'granted' && fullscreen === 'granted'
 
@@ -160,13 +162,15 @@ export default function App() {
             onAction={getCameraAccess}
           />
           <PermissionItem
-            icon={<FullscreenIcon />}
-            title="Switch to full screen"
-            description="The exam must run in full screen to keep the session secure."
-            status={fullscreen}
-            actionLabel="Switch"
-            onAction={switchToFullscreen}
-          />
+  icon={<FullscreenIcon />}
+  title="Switch to full screen"
+  description="The exam runs in a locked full-screen mode to keep the session secure."
+  status={fullscreen}
+  errorMessage="Could not enter full screen. Please try again."
+  actionLabel="Give Full Screen Permissions"
+  grantedLabel="Full Screen Enabled"
+  onAction={switchToFullscreen}
+/>
         </ul>
 
         <footer className="card__footer">
